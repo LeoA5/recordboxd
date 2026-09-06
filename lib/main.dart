@@ -280,6 +280,7 @@ class _HomeShellState extends State<HomeShell> {
     HomePage(),
     YourReviewsPage(),
     FeedPage(),
+    TrendsPage(),
     AlbumSearchPage(title: 'Add Album Review'),
   ];
 
@@ -309,6 +310,11 @@ class _HomeShellState extends State<HomeShell> {
             icon: Icon(Icons.feed_outlined),
             selectedIcon: Icon(Icons.feed),
             label: 'Feed',
+          ),
+          NavigationDestination(
+              icon: Icon(Icons.trending_up_outlined),
+              selectedIcon: Icon(Icons.trending_up),
+              label: 'Trends'
           ),
           NavigationDestination(
             icon: Icon(Icons.my_library_add_outlined),
@@ -504,13 +510,236 @@ class _ReviewTile extends StatelessWidget {
   }
 }
 
-class YourReviewsPage extends StatelessWidget {
-  const YourReviewsPage({super.key});
+class TrendsPage extends StatefulWidget {
+  const TrendsPage({super.key});
+
+  @override
+  State<TrendsPage> createState() => _TrendsPageState();
+}
+
+// Aggregate function that sorts the top n items by the key given
+List<({String label, int count, Review sample})> _aggregate(
+    List<Review> reviews,
+    String Function(Review) keyOf,
+    ) {
+  final Map<String, int>counts = <String, int>{};
+  final Map<String, Review> samples = <String, Review>{};
+
+  for (final review in reviews) {
+    final key = keyOf(review);
+    counts[key] = (counts[key] ?? 0) + 1;
+    samples.putIfAbsent(key, () => review);
+  }
+
+  final entries = counts.entries
+      .map((e) => (label: e.key, count: e.value, sample: samples[e.key]!))
+      .toList();
+  entries.sort((a,b) => b.count.compareTo(a.count));
+  return entries;
+}
+
+class _TrendsPageState extends State<TrendsPage> {
+  List<Review> _recentReviews = [];
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  // Record lists for top artists, albums, and users
+  List<({String label, int count, Review sample})> _topArtists = [];
+  List<({String label, int count, Review sample})> _topAlbums = [];
+  List<({String label, int count, Review sample})> _topUsers = [];
+
+  // Calls _loadTrends on page generation
+  @override
+  void initState() {
+    super.initState();
+    _loadTrends();
+  }
+
+  Future<void> _loadTrends() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    final Timestamp cutoff = Timestamp.fromDate(
+        DateTime.now().subtract(const Duration(days: 7))
+    );
+    try{
+      QuerySnapshot<Map<String, dynamic>> snapshot = await FirebaseFirestore
+          .instance
+          .collection('reviews')
+          .where('createdAt', isGreaterThan: cutoff)
+          .get();
+      if (!mounted) return;
+      setState(() {
+        _recentReviews = snapshot.docs.map(Review.fromDoc).toList();
+        _topArtists = _aggregate(_recentReviews, (r) => r.artistName)
+            .take(3).toList();
+        _topAlbums = _aggregate(_recentReviews, (r) => r.albumName)
+            .take(5).toList();
+        _topUsers = _aggregate(_recentReviews, (r) => r.userEmail)
+            .take(3).toList();
+        _isLoading = false;
+      });
+    }
+    catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = 'Unknown Error: $e';
+        _isLoading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('Trends'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.logout),
+            tooltip: 'Log out',
+            onPressed: () => _signOut(context),
+          ),
+        ],
+      ),
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null
+          ? Center(child: Text(_errorMessage!))
+          : RefreshIndicator(
+        onRefresh: _loadTrends,
+        child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.all(16.0),
+          children: [
+            Text(
+              'Most Reviewed Artists (Last 7 Days)',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            _buildRankedSection(_topArtists),
+            const Divider(height: 32),
+            Text(
+              'Most Reviewed Albums (Last 7 Days)',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            _buildRankedSection(_topAlbums, showArtwork: true),
+            const Divider(height: 32),
+            Text(
+              'Most Active Users (Last 7 Days)',
+              style: Theme.of(context).textTheme.titleLarge,
+            ),
+            const SizedBox(height: 8),
+            _buildRankedSection(_topUsers),
+          ],
+        ),
+      ),
+    );
+  }
+
+  // Shared row layout for all three ranked lists: a rank badge (or, when
+  // showArtwork is true, a thumbnail from the entry's representative
+  // review), the label (artist/album/user), and its count over 7 days.
+  Widget _buildRankedSection(
+      List<({String label, int count, Review sample})> entries, {
+        bool showArtwork = false,
+      }) {
+    if (entries.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 12.0),
+        child: Text('No reviews in the last 7 days yet.'),
+      );
+    }
+
+    return Column(
+      children: [
+        for (var i = 0; i < entries.length; i++)
+          ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: showArtwork
+                ? SizedBox(
+              width: 48,
+              height: 48,
+              child: entries[i].sample.artworkUrl.isNotEmpty
+                  ? Image.network(
+                entries[i].sample.artworkUrl,
+                fit: BoxFit.cover,
+                errorBuilder: (_, _, _) =>
+                const Icon(Icons.album),
+              )
+                  : const Icon(Icons.album),
+            )
+                : CircleAvatar(child: Text('${i + 1}')),
+            title: Text(
+              // With artwork already conveying "this is one item in a
+              // list," the rank is folded into the label text itself
+              // instead of a separate badge, so the artwork stays the
+              // single visual focus of the leading slot.
+              showArtwork ? '${i + 1}. ${entries[i].label}' : entries[i].label,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            trailing: Text(
+              '${entries[i].count} review${entries[i].count == 1 ? '' : 's'}',
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class YourReviewsPage extends StatefulWidget {
+  const YourReviewsPage({super.key});
+
+  @override
+  State<YourReviewsPage> createState() => _YourReviewsPageState();
+}
+
+class _YourReviewsPageState extends State<YourReviewsPage> {
+  List<Review> _reviews = [];
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadReviews();
+  }
+
+  Future<void> _loadReviews() async {
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
     final uid = FirebaseAuth.instance.currentUser?.uid;
 
+    try {
+      final snapshot = await FirebaseFirestore.instance
+          .collection('reviews')
+          .where('userId', isEqualTo: uid)
+          .orderBy('createdAt', descending: true)
+          .get();
+
+      if (!mounted) return;
+      setState(() {
+        _reviews = snapshot.docs.map(Review.fromDoc).toList();
+        _isLoading = false;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = 'Could not load your reviews: $e';
+        _isLoading = false;
+      });
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         title: const Text('My Review Library'),
@@ -522,46 +751,92 @@ class YourReviewsPage extends StatelessWidget {
           ),
         ],
       ),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('reviews')
-            .where('userId', isEqualTo: uid)
-            .orderBy('createdAt', descending: true)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final reviews = snapshot.data!.docs.map(Review.fromDoc).toList();
-          if (reviews.isEmpty) {
-            return const Center(
-              child: Text('No reviews yet — search for an album to add one.'),
-            );
-          }
-          return ListView.separated(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0),
-            itemCount: reviews.length,
-            separatorBuilder: (_, _) => const Divider(height: 1),
-            itemBuilder: (context, index) =>
-                _ReviewTile(review: reviews[index], showEmail: false),
-          );
-        },
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null
+          ? Center(child: Text(_errorMessage!))
+          : RefreshIndicator(
+        onRefresh: _loadReviews,
+        child: _reviews.isEmpty
+            ? ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            Padding(
+              padding: EdgeInsets.symmetric(vertical: 64.0),
+              child: Center(
+                child: Text(
+                  'No reviews yet — search for an album to add one.',
+                ),
+              ),
+            ),
+          ],
+        )
+            : ListView.separated(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+          itemCount: _reviews.length,
+          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemBuilder: (context, index) => _ReviewTile(
+            review: _reviews[index],
+            showEmail: false,
+          ),
+        ),
       ),
     );
   }
 }
 
-class FeedPage extends StatelessWidget {
+class FeedPage extends StatefulWidget {
   const FeedPage({super.key});
+
+  @override
+  State<FeedPage> createState() => _FeedPageState();
+}
+
+class _FeedPageState extends State<FeedPage> {
+  List<Review> _reviews = [];
+  bool _isLoading = true;
+  String? _errorMessage;
+
+  @override
+  void initState() {
+    super.initState();
+    _loadFeed();
+  }
+
+  Future<void> _loadFeed() async{
+    setState(() {
+      _isLoading = true;
+      _errorMessage = null;
+    });
+
+    try {
+      QuerySnapshot<Map<String, dynamic>> snapshot = await FirebaseFirestore
+          .instance
+          .collection('reviews')
+          .orderBy('createdAt', descending: true)
+          .limit(100)
+          .get();
+      if (!mounted) return;
+      setState(() {
+        _reviews = snapshot.docs.map(Review.fromDoc).toList();
+        _isLoading = false;
+      });
+    }
+    catch (e) {
+      if (!mounted) return;
+      setState(() {
+        _errorMessage = 'Could not load the feed: $e';
+        _isLoading = false;
+      });
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('Live Reviews Feed'),
+        title: const Text('Feed'),
         actions: [
           IconButton(
             icon: const Icon(Icons.logout),
@@ -570,31 +845,30 @@ class FeedPage extends StatelessWidget {
           ),
         ],
       ),
-      body: StreamBuilder<QuerySnapshot<Map<String, dynamic>>>(
-        stream: FirebaseFirestore.instance
-            .collection('reviews')
-            .orderBy('createdAt', descending: true)
-            .limit(100)
-            .snapshots(),
-        builder: (context, snapshot) {
-          if (snapshot.hasError) {
-            return Center(child: Text('Error: ${snapshot.error}'));
-          }
-          if (!snapshot.hasData) {
-            return const Center(child: CircularProgressIndicator());
-          }
-          final reviews = snapshot.data!.docs.map(Review.fromDoc).toList();
-          if (reviews.isEmpty) {
-            return const Center(child: Text('No reviews yet.'));
-          }
-          return ListView.separated(
-            padding: const EdgeInsets.symmetric(horizontal: 16.0),
-            itemCount: reviews.length,
-            separatorBuilder: (_, _) => const Divider(height: 1),
-            itemBuilder: (context, index) =>
-                _ReviewTile(review: reviews[index], showEmail: true),
-          );
-        },
+      body: _isLoading
+          ? const Center(child: CircularProgressIndicator())
+          : _errorMessage != null
+          ? Center(child: Text(_errorMessage!))
+          : RefreshIndicator(
+        onRefresh: _loadFeed,
+        child: _reviews.isEmpty
+            ? ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
+          children: const [
+            Padding(
+              padding: EdgeInsets.symmetric(vertical: 64.0),
+              child: Center(child: Text('No reviews yet.')),
+            ),
+          ],
+        )
+            : ListView.separated(
+          physics: const AlwaysScrollableScrollPhysics(),
+          padding: const EdgeInsets.symmetric(horizontal: 16.0),
+          itemCount: _reviews.length,
+          separatorBuilder: (_, _) => const Divider(height: 1),
+          itemBuilder: (context, index) =>
+              _ReviewTile(review: _reviews[index], showEmail: true),
+        ),
       ),
     );
   }
@@ -713,6 +987,7 @@ class _HomePageState extends State<HomePage> {
           : RefreshIndicator(
         onRefresh: _loadData,
         child: ListView(
+          physics: const AlwaysScrollableScrollPhysics(),
           padding: const EdgeInsets.all(16.0),
           children: [
             Text(
